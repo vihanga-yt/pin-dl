@@ -8,8 +8,6 @@ export default async function handler(req, res) {
   }
 
   try {
-    // 1. Construct the internal API payload
-    // This mimics the "data" parameter Pinterest sends when you search
     const dataPayload = {
       options: {
         article: null,
@@ -19,15 +17,13 @@ export default async function handler(req, res) {
         corpus: null,
         customized_rerank_type: null,
         filters: null,
-        query: q, // Your search term
+        query: q,
         scope: "pins",
         source_id: null
       },
       context: {}
     };
 
-    // 2. Make the Request
-    // We hit the 'BaseSearchResource' endpoint which returns JSON directly
     const url = `https://www.pinterest.com/resource/BaseSearchResource/get/`;
     
     const response = await axios.get(url, {
@@ -37,39 +33,30 @@ export default async function handler(req, res) {
         _: Date.now()
       },
       headers: {
+        // We set a static User-Agent, so no external library is needed
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'X-Requested-With': 'XMLHttpRequest',
         'Referer': 'https://www.pinterest.com/',
-        'Accept': 'application/json, text/javascript, */*; q=0.01'
+        'Accept': 'application/json'
       }
     });
 
-    // 3. Extract the Pins
     const results = response.data?.resource_response?.data?.results || [];
     
-    // 4. Format the Output (Get High-Res Images)
+    // Filter and map to get clean URLs
     const pins = results
-      .filter(pin => pin.images && pin.images['orig']) // Ensure image exists
+      .filter(pin => pin.images && pin.images['orig'])
       .map(pin => ({
         id: pin.id,
         title: pin.grid_title || pin.description,
-        image_url: pin.images['orig'].url, // The Original HD Image
+        image: pin.images['orig'].url, // HD Image
         width: pin.images['orig'].width,
-        height: pin.images['orig'].height,
-        pinner: pin.pinner?.username
+        height: pin.images['orig'].height
       }));
 
-    res.status(200).json({
-      search_term: q,
-      count: pins.length,
-      data: pins
-    });
+    res.status(200).json({ count: pins.length, data: pins });
 
   } catch (error) {
-    console.error("API Error:", error.message);
-    res.status(500).json({ 
-      error: 'Failed to fetch data from Pinterest', 
-      details: error.response?.data || error.message 
-    });
+    res.status(500).json({ error: 'Error fetching data', details: error.message });
   }
 }
