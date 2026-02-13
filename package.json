@@ -1,14 +1,14 @@
 {
-  "name": "pinterest-puppeteer-fix",
+  "name": "pinterest-fix-final",
   "version": "1.0.0",
   "scripts": {
     "start": "node api/index.js"
   },
   "dependencies": {
-    "puppeteer-core": "21.5.0",
-    "@sparticuz/chromium": "119.0.0"
+    "puppeteer-core": "22.6.0",
+    "@sparticuz/chromium": "123.0.1"
   },
   "engines": {
-    "node": "18.x"
+    "node": "20.x"
   }
 }
