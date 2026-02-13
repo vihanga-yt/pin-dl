@@ -1,85 +1,81 @@
 const axios = require('axios');
-const cheerio = require('cheerio');
 
 export default async function handler(req, res) {
     const { q } = req.query;
-    if (!q) return res.status(400).json({ error: "Missing query parameter 'q'" });
+    if (!q) return res.status(400).json({ error: "Query 'q' is required" });
 
     try {
-        const url = `https://www.pinterest.com/search/pins/?q=${encodeURIComponent(q)}`;
-        
-        // We use a high-quality User-Agent to avoid being flagged as a basic bot
-        const response = await axios.get(url, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'DNT': '1',
-                'Upgrade-Insecure-Requests': '1'
+        // 1. Construct the internal Pinterest Search Resource URL
+        // This is the specific endpoint used by Pinterest's internal engine
+        const searchOptions = {
+            options: {
+                query: q,
+                scope: "pins",
+                page_size: 25, // Number of results
+                filters: null
             },
-            timeout: 10000
+            context: {}
+        };
+
+        const baseUrl = "https://www.pinterest.com/resource/BaseSearchResource/get/";
+        const params = new URLSearchParams({
+            source_url: `/search/pins/?q=${encodeURIComponent(q)}`,
+            data: JSON.stringify(searchOptions),
+            _: Date.now()
         });
 
-        const $ = cheerio.load(response.data);
-        let images = [];
-
-        // METHOD 1: Parse the JSON data block (The standard way)
-        const scriptData = $('#__PWS_DATA__').html();
-        if (scriptData) {
-            try {
-                const json = JSON.parse(scriptData);
-                
-                // We use a recursive search to find the 'pins' object anywhere in the JSON
-                const findPins = (obj) => {
-                    if (!obj || typeof obj !== 'object') return null;
-                    if (obj.pins && typeof obj.pins === 'object') return obj.pins;
-                    for (const key in obj) {
-                        const found = findPins(obj[key]);
-                        if (found) return found;
-                    }
-                    return null;
-                };
-
-                const pins = findPins(json);
-                if (pins) {
-                    Object.values(pins).forEach(pin => {
-                        if (pin.images && pin.images.orig) {
-                            images.push(pin.images.orig.url);
-                        }
-                    });
-                }
-            } catch (e) {
-                console.log("JSON Parse failed, trying Regex fallback...");
+        // 2. Add Mobile-Style Headers
+        // These headers make Pinterest think the request is coming from their own frontend
+        const response = await axios.get(`${baseUrl}?${params.toString()}`, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1',
+                'X-Requested-With': 'XMLHttpRequest',
+                'Accept': 'application/json, text/javascript, */*; q=0.01',
+                'Referer': `https://www.pinterest.com/search/pins/?q=${encodeURIComponent(q)}`,
+                'Sec-Fetch-Mode': 'cors',
+                'Sec-Fetch-Site': 'same-origin'
             }
+        });
+
+        // 3. Extract Pins from the Resource Response
+        const results = response.data?.resource_response?.data?.results || [];
+
+        if (results.length === 0) {
+            return res.status(404).json({ 
+                status: "error", 
+                message: "Pinterest returned no data for this IP. They are likely rate-limiting Vercel.",
+                raw: response.data // To help you debug what they sent back
+            });
         }
 
-        // METHOD 2: Regex Fallback (If Pinterest obfuscates the JSON)
-        // This looks for anything matching the high-res Pinterest image URL pattern
-        if (images.length === 0) {
-            const html = response.data;
-            const regex = /https:\/\/i\.pinimg\.com\/originals\/[a-z0-9\/]+\.(jpg|png|gif|webp)/g;
-            const matches = html.match(regex);
-            if (matches) {
-                images = [...new Set(matches)]; // Remove duplicates
-            }
-        }
-
-        // Final Filter: Convert 236x or 474x links to originals if any were caught
-        const finalImages = images.map(img => img.replace(/\/(236x|474x|564x|736x)\//, '/originals/'));
+        const pins = results.map(pin => {
+            // Get the highest resolution possible
+            const img = pin.images?.orig?.url || 
+                        pin.images?.['736x']?.url || 
+                        pin.images?.['564x']?.url;
+            
+            return {
+                id: pin.id,
+                title: pin.title || pin.grid_title || "Pinterest Pin",
+                image: img,
+                source: `https://www.pinterest.com/pin/${pin.id}/`
+            };
+        });
 
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.status(200).json({
-            status: finalImages.length > 0 ? "success" : "no_results",
+            status: "success",
             query: q,
-            count: finalImages.length,
-            images: finalImages
+            count: pins.length,
+            images: pins
         });
 
     } catch (error) {
+        console.error("Scraper Error:", error.message);
         res.status(500).json({ 
-            error: "Pinterest Blocked Connection", 
-            details: error.message,
-            tip: "Vercel IPs are sometimes pre-blocked. Try redeploying to a different Vercel region (e.g. Europe) in project settings."
+            error: "Request Failed", 
+            message: error.message,
+            tip: "If you get 403, Pinterest has blacklisted this Vercel deployment region. Try changing Vercel Region to 'London' or 'Singapore' in settings."
         });
     }
 }
