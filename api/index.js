@@ -1,5 +1,5 @@
-const chromium = require('@sparticuz/chromium');
-const puppeteer = require('puppeteer-core');
+import chromium from '@sparticuz/chromium';
+import playwright from 'playwright-core';
 
 export default async function handler(req, res) {
   const { q } = req.query;
@@ -11,28 +11,30 @@ export default async function handler(req, res) {
   let browser = null;
 
   try {
-    // OPTIONAL: If running locally on Windows/Mac, use local chrome path
-    // const localExe = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
+    // 1. Setup Browser for Vercel
+    // Playwright requires pointing specifically to the chromium binary
+    chromium.setHeadlessMode = true;
+    chromium.setGraphicsMode = false;
 
-    browser = await puppeteer.launch({
+    browser = await playwright.chromium.launch({
       args: chromium.args,
-      defaultViewport: chromium.defaultViewport,
       executablePath: await chromium.executablePath(),
-      headless: chromium.headless, // Uses correct mode for sparticuz
+      headless: chromium.headless,
     });
 
-    const page = await browser.newPage();
+    // 2. Open Page
+    const context = await browser.newContext({
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
+    });
+    const page = await context.newPage();
 
-    // 1. Stealth: Fake a real User Agent
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36');
-
-    // 2. Go to Pinterest
+    // 3. Go to Pinterest
     await page.goto(`https://www.pinterest.com/search/pins/?q=${encodeURIComponent(q)}&rs=typed`, { 
-      waitUntil: 'domcontentloaded', // Faster than networkidle2
+      waitUntil: 'domcontentloaded', 
       timeout: 15000 
     });
 
-    // 3. Scrape
+    // 4. Scrape (Logic is identical to Puppeteer)
     const images = await page.evaluate(() => {
       return Array.from(document.querySelectorAll('img'))
         .map(img => img.src)
@@ -40,7 +42,6 @@ export default async function handler(req, res) {
         .map(src => src.replace(/\/236x\/|\/474x\/|\/564x\//, '/originals/'));
     });
 
-    // 4. Unique results
     const uniqueImages = [...new Set(images)];
 
     res.status(200).json({
