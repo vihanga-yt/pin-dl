@@ -7,7 +7,11 @@ export default async function handler(req, res) {
     if (!q) return res.status(400).json({ error: "Search query 'q' required" });
 
     const jar = new CookieJar();
-    const client = wrapper(axios.create({ jar, withCredentials: true }));
+ // Add this if you get desperate
+const client = wrapper(axios.create({ 
+    jar, 
+    proxy: { host: 'PROXY_IP', port: 8080 } 
+}));
 
     // Use a very specific Mobile User-Agent
     const userAgent = 'Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36';
