@@ -5,74 +5,57 @@ export default async function handler(req, res) {
     if (!q) return res.status(400).json({ error: "Query 'q' is required" });
 
     try {
-        // STEP 1: Mimic the Pinterest Android App
-        // The Android API is significantly less restricted than the Web API
-        const response = await axios.get('https://www.pinterest.com/resource/BaseSearchResource/get/', {
-            params: {
-                source_url: `/search/pins/?q=${encodeURIComponent(q)}`,
-                data: JSON.stringify({
-                    options: {
-                        query: q,
-                        scope: "pins",
-                        page_size: 25,
-                        field_set_key: "unauth_react_main_grid"
-                    },
-                    context: {}
-                }),
-                _: Date.now()
+        // 1. Define the Pinterest Mobile API URL
+        const pinterestUrl = `https://www.pinterest.com/resource/BaseSearchResource/get/?source_url=${encodeURIComponent(`/search/pins/?q=${q}`)}&data=${encodeURIComponent(JSON.stringify({
+            options: {
+                query: q,
+                scope: "pins",
+                page_size: 25,
+                field_set_key: "unauth_react_main_grid"
             },
-            headers: {
-                // This specific User-Agent is the key to bypassing the 403
-                'User-Agent': 'Pinterest/Android 11.23.0 (Pixel 6; 13)',
-                'Accept': 'application/json',
-                'X-Pinterest-AppState': 'active',
-                'X-Requested-With': 'XMLHttpRequest'
-            }
-        });
+            context: {}
+        }))}`;
 
-        // STEP 2: Extract Pins using a "Safe Navigator"
-        const results = response.data?.resource_response?.data?.results || [];
+        // 2. Wrap it in a FREE Proxy (AllOrigins)
+        // This hides Vercel's IP and uses AllOrigins' IP instead
+        const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(pinterestUrl)}`;
+
+        const response = await axios.get(proxyUrl);
         
+        // AllOrigins returns the data as a string inside a 'contents' field
+        const rawData = JSON.parse(response.data.contents);
+        const results = rawData?.resource_response?.data?.results || [];
+
         if (results.length === 0) {
-            // If the API returns 0, it's a soft-block. 
-            // We return a specific error to tell you to change the Vercel Region.
-            return res.status(403).json({
-                error: "Pinterest Soft-Block",
-                message: "API returned 0 results. Vercel's IP is currently being throttled.",
-                tip: "Change Vercel region to 'hnd1' (Tokyo) or 'syd1' (Sydney) in settings."
+            return res.status(404).json({
+                status: "error",
+                message: "Proxy succeeded but Pinterest returned no results. Try a different search term.",
+                debug: rawData
             });
         }
 
-        // STEP 3: Map results to HD Image URLs
-        const pins = results.map(pin => {
-            const highRes = pin.images?.orig?.url || 
-                            pin.images?.['736x']?.url || 
-                            pin.images?.['564x']?.url;
-            
-            return {
-                id: pin.id,
-                title: pin.title || pin.grid_title || "Pinterest Pin",
-                image: highRes,
-                pinner: pin.pinner?.username,
-                link: `https://www.pinterest.com/pin/${pin.id}/`
-            };
-        }).filter(p => p.image);
+        // 3. Extract high-res images
+        const pins = results.map(pin => ({
+            id: pin.id,
+            title: pin.title || pin.grid_title || "Pinterest Image",
+            image: pin.images?.orig?.url || pin.images?.['736x']?.url,
+            link: `https://www.pinterest.com/pin/${pin.id}/`
+        })).filter(p => p.image);
 
+        // 4. Return Data
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.status(200).json({
             status: "success",
             query: q,
             count: pins.length,
-            data: pins
+            images: pins
         });
 
     } catch (error) {
-        // STEP 4: Fallback Logic
-        // If the API throws a 403, it means the IP is hard-blocked.
         res.status(500).json({
-            error: "403 Forbidden",
-            message: "Vercel IP is hard-blocked by Pinterest.",
-            solution: "You MUST change the Vercel Function Region to bypass this."
+            error: "Proxy Scrape Failed",
+            message: error.message,
+            tip: "If this fails, the free proxy is down. You can try 'https://corsproxy.io/?' as an alternative."
         });
     }
 }
