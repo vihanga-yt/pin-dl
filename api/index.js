@@ -18,7 +18,7 @@ export default async function handler(req, res) {
 
         // 2. Wrap it in a FREE Proxy (AllOrigins)
         // This hides Vercel's IP and uses AllOrigins' IP instead
-        const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(pinterestUrl)}`;
+const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(pinterestUrl)}`;
 
         const response = await axios.get(proxyUrl);
         
