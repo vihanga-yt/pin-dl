@@ -1,78 +1,79 @@
 const axios = require('axios');
-const { wrapper } = require('axios-cookiejar-support');
-const { CookieJar } = require('tough-cookie');
+const cheerio = require('cheerio');
 
 export default async function handler(req, res) {
     const { q } = req.query;
     if (!q) return res.status(400).json({ error: "Search query 'q' required" });
 
-    const jar = new CookieJar();
- // Add this if you get desperate
-const client = wrapper(axios.create({ 
-    jar, 
-    proxy: { host: 'PROXY_IP', port: 8080 } 
-}));
-
-    // Use a very specific Mobile User-Agent
-    const userAgent = 'Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36';
-
     try {
-        // STEP 1: Handshake - Visit Pinterest home to generate a Guest Session
-        // This generates the necessary cookies in our 'jar'
-        const home = await client.get('https://www.pinterest.com/', {
-            headers: { 'User-Agent': userAgent }
-        });
-
-        // STEP 2: Extract CSRF Token from cookies
-        const cookies = await jar.getCookies('https://www.pinterest.com/');
-        const csrfToken = cookies.find(c => c.key === 'csrftoken')?.value || 'missing-token';
-
-        // STEP 3: The Internal API Call
-        const searchPayload = {
-            options: {
-                query: q,
-                scope: "pins",
-                page_size: 20,
-                field_set_key: "unauth_react"
-            },
-            context: {}
-        };
-
-        const response = await client.get('https://www.pinterest.com/resource/BaseSearchResource/get/', {
-            params: {
-                source_url: `/search/pins/?q=${encodeURIComponent(q)}`,
-                data: JSON.stringify(searchPayload),
-                _: Date.now()
-            },
+        // STEP 1: Spoof Googlebot
+        // Pinterest allows Googlebot to see content to maintain their SEO rankings.
+        const response = await axios.get(`https://www.pinterest.com/search/pins/?q=${encodeURIComponent(q)}`, {
             headers: {
-                'User-Agent': userAgent,
-                'X-CSRFToken': csrfToken,
-                'X-Requested-With': 'XMLHttpRequest',
-                'Referer': 'https://www.pinterest.com/',
-                'Accept': 'application/json'
-            }
+                'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Referer': 'https://www.google.com/'
+            },
+            timeout: 10000
         });
 
-        const results = response.data?.resource_response?.data?.results || [];
+        const $ = cheerio.load(response.data);
+        let images = [];
 
-        const pins = results.map(pin => ({
-            id: pin.id,
-            image: pin.images?.orig?.url || pin.images?.['736x']?.url,
-            title: pin.title || pin.grid_title || "Pin"
-        })).filter(p => p.image); // Filter out items with no image
+        // METHOD A: Scrape the JSON state (Hidden in script tags)
+        const scriptData = $('#__PWS_DATA__').html();
+        if (scriptData) {
+            try {
+                const json = JSON.parse(scriptData);
+                // Deep search for pins in the JSON tree
+                const pins = findInObject(json, 'pins');
+                if (pins) {
+                    Object.values(pins).forEach(pin => {
+                        if (pin.images?.orig?.url) images.push(pin.images.orig.url);
+                    });
+                }
+            } catch (e) { /* ignore parse errors */ }
+        }
 
-        res.setHeader('Cache-Control', 's-maxage=3600, stale-while-revalidate');
+        // METHOD B: Direct Image Extraction (Regex fallback)
+        if (images.length === 0) {
+            const html = response.data;
+            // Look for Pinterest original image patterns
+            const regex = /https:\/\/i\.pinimg\.com\/originals\/[a-z0-9\/]+\.(jpg|png|gif|webp)/g;
+            const matches = html.match(regex);
+            if (matches) images = [...new Set(matches)];
+        }
+
+        // Clean up and convert to high-res
+        const cleanImages = images
+            .map(img => img.replace(/\/(236x|474x|564x|736x)\//, '/originals/'))
+            .filter(img => img.includes('i.pinimg.com'));
+
+        res.setHeader('Access-Control-Allow-Origin', '*');
         res.status(200).json({
-            status: pins.length > 0 ? "success" : "blocked",
-            count: pins.length,
-            images: pins
+            status: cleanImages.length > 0 ? "success" : "limited",
+            count: cleanImages.length,
+            images: cleanImages,
+            note: cleanImages.length === 0 ? "Pinterest is heavily throttling this IP. Try changing Vercel region." : null
         });
 
     } catch (error) {
         res.status(500).json({
-            error: "Pinterest Blocked Vercel",
+            error: "Pinterest 403 Bypass Failed",
             message: error.message,
-            tip: "Pinterest blocks Data Center IPs. Go to Vercel Settings -> Functions -> Region and change to 'syd1' (Sydney) or 'fra1' (Frankfurt) and redeploy."
+            tip: "Change Vercel Region to 'syd1' (Sydney) or 'hnd1' (Tokyo) in Project Settings -> Functions."
         });
     }
+}
+
+// Helper to find a key anywhere in a deep JSON object
+function findInObject(obj, key) {
+    if (obj && typeof obj === 'object') {
+        if (obj[key]) return obj[key];
+        for (const k in obj) {
+            const result = findInObject(obj[k], key);
+            if (result) return result;
+        }
+    }
+    return null;
 }
