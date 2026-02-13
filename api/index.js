@@ -1,62 +1,57 @@
-import axios from 'axios';
+const chromium = require('@sparticuz/chromium');
+const puppeteer = require('puppeteer-core');
 
 export default async function handler(req, res) {
   const { q } = req.query;
+  if (!q) return res.status(400).json({ error: 'Missing query' });
 
-  if (!q) {
-    return res.status(400).json({ error: 'Missing query. Usage: ?q=cats' });
-  }
+  let browser = null;
 
   try {
-    const dataPayload = {
-      options: {
-        article: null,
-        applied_productive_tags: [],
-        appliedProductiveTag: null,
-        auto_correction_disabled: false,
-        corpus: null,
-        customized_rerank_type: null,
-        filters: null,
-        query: q,
-        scope: "pins",
-        source_id: null
-      },
-      context: {}
-    };
+    // 1. Setup Chromium for Vercel Node 20
+    chromium.setHeadlessMode = true; // Use new headless mode
+    chromium.setGraphicsMode = false; // Required for performance
 
-    const url = `https://www.pinterest.com/resource/BaseSearchResource/get/`;
-    
-    const response = await axios.get(url, {
-      params: {
-        source_url: `/search/pins/?q=${encodeURIComponent(q)}`,
-        data: JSON.stringify(dataPayload),
-        _: Date.now()
-      },
-      headers: {
-        // We set a static User-Agent, so no external library is needed
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'X-Requested-With': 'XMLHttpRequest',
-        'Referer': 'https://www.pinterest.com/',
-        'Accept': 'application/json'
-      }
+    browser = await puppeteer.launch({
+      args: [...chromium.args, "--hide-scrollbars", "--disable-web-security"],
+      defaultViewport: chromium.defaultViewport,
+      executablePath: await chromium.executablePath(),
+      headless: chromium.headless,
+      ignoreHTTPSErrors: true,
     });
 
-    const results = response.data?.resource_response?.data?.results || [];
-    
-    // Filter and map to get clean URLs
-    const pins = results
-      .filter(pin => pin.images && pin.images['orig'])
-      .map(pin => ({
-        id: pin.id,
-        title: pin.grid_title || pin.description,
-        image: pin.images['orig'].url, // HD Image
-        width: pin.images['orig'].width,
-        height: pin.images['orig'].height
-      }));
+    const page = await browser.newPage();
 
-    res.status(200).json({ count: pins.length, data: pins });
+    // 2. Set Fake User-Agent (Critical for bypassing 403)
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36');
+
+    // 3. Navigate
+    await page.goto(`https://www.pinterest.com/search/pins/?q=${encodeURIComponent(q)}`, {
+      waitUntil: 'domcontentloaded', // Faster
+      timeout: 15000 // 15s timeout
+    });
+
+    // 4. Scrape Data
+    const images = await page.evaluate(() => {
+      return Array.from(document.querySelectorAll('img'))
+        .map(img => img.src)
+        .filter(src => src.includes('236x') || src.includes('564x') || src.includes('474x'))
+        .map(src => src.replace(/\/236x\/|\/474x\/|\/564x\//, '/originals/'));
+    });
+
+    const uniqueImages = [...new Set(images)];
+
+    res.status(200).json({
+      count: uniqueImages.length,
+      images: uniqueImages
+    });
 
   } catch (error) {
-    res.status(500).json({ error: 'Error fetching data', details: error.message });
+    console.error("Puppeteer Error:", error);
+    res.status(500).json({ error: 'Failed to scrape', details: error.message });
+  } finally {
+    if (browser) {
+      await browser.close();
+    }
   }
 }
