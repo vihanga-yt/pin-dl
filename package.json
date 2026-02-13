@@ -1,13 +1,14 @@
 {
-  "name": "pinterest-api-lite",
+  "name": "pinterest-puppeteer-fix",
   "version": "1.0.0",
   "scripts": {
     "start": "node api/index.js"
   },
   "dependencies": {
-    "axios": "^1.6.0"
+    "puppeteer-core": "21.5.0",
+    "@sparticuz/chromium": "119.0.0"
   },
   "engines": {
-    "node": "20.x"
+    "node": "18.x"
   }
 }
