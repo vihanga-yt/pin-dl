@@ -1,81 +1,74 @@
 const axios = require('axios');
+const { wrapper } = require('axios-cookiejar-support');
+const { CookieJar } = require('tough-cookie');
 
 export default async function handler(req, res) {
     const { q } = req.query;
-    if (!q) return res.status(400).json({ error: "Query 'q' is required" });
+    if (!q) return res.status(400).json({ error: "Search query 'q' required" });
+
+    const jar = new CookieJar();
+    const client = wrapper(axios.create({ jar, withCredentials: true }));
+
+    // Use a very specific Mobile User-Agent
+    const userAgent = 'Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36';
 
     try {
-        // 1. Construct the internal Pinterest Search Resource URL
-        // This is the specific endpoint used by Pinterest's internal engine
-        const searchOptions = {
+        // STEP 1: Handshake - Visit Pinterest home to generate a Guest Session
+        // This generates the necessary cookies in our 'jar'
+        const home = await client.get('https://www.pinterest.com/', {
+            headers: { 'User-Agent': userAgent }
+        });
+
+        // STEP 2: Extract CSRF Token from cookies
+        const cookies = await jar.getCookies('https://www.pinterest.com/');
+        const csrfToken = cookies.find(c => c.key === 'csrftoken')?.value || 'missing-token';
+
+        // STEP 3: The Internal API Call
+        const searchPayload = {
             options: {
                 query: q,
                 scope: "pins",
-                page_size: 25, // Number of results
-                filters: null
+                page_size: 20,
+                field_set_key: "unauth_react"
             },
             context: {}
         };
 
-        const baseUrl = "https://www.pinterest.com/resource/BaseSearchResource/get/";
-        const params = new URLSearchParams({
-            source_url: `/search/pins/?q=${encodeURIComponent(q)}`,
-            data: JSON.stringify(searchOptions),
-            _: Date.now()
-        });
-
-        // 2. Add Mobile-Style Headers
-        // These headers make Pinterest think the request is coming from their own frontend
-        const response = await axios.get(`${baseUrl}?${params.toString()}`, {
+        const response = await client.get('https://www.pinterest.com/resource/BaseSearchResource/get/', {
+            params: {
+                source_url: `/search/pins/?q=${encodeURIComponent(q)}`,
+                data: JSON.stringify(searchPayload),
+                _: Date.now()
+            },
             headers: {
-                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1',
+                'User-Agent': userAgent,
+                'X-CSRFToken': csrfToken,
                 'X-Requested-With': 'XMLHttpRequest',
-                'Accept': 'application/json, text/javascript, */*; q=0.01',
-                'Referer': `https://www.pinterest.com/search/pins/?q=${encodeURIComponent(q)}`,
-                'Sec-Fetch-Mode': 'cors',
-                'Sec-Fetch-Site': 'same-origin'
+                'Referer': 'https://www.pinterest.com/',
+                'Accept': 'application/json'
             }
         });
 
-        // 3. Extract Pins from the Resource Response
         const results = response.data?.resource_response?.data?.results || [];
 
-        if (results.length === 0) {
-            return res.status(404).json({ 
-                status: "error", 
-                message: "Pinterest returned no data for this IP. They are likely rate-limiting Vercel.",
-                raw: response.data // To help you debug what they sent back
-            });
-        }
+        const pins = results.map(pin => ({
+            id: pin.id,
+            image: pin.images?.orig?.url || pin.images?.['736x']?.url,
+            title: pin.title || pin.grid_title || "Pin"
+        })).filter(p => p.image); // Filter out items with no image
 
-        const pins = results.map(pin => {
-            // Get the highest resolution possible
-            const img = pin.images?.orig?.url || 
-                        pin.images?.['736x']?.url || 
-                        pin.images?.['564x']?.url;
-            
-            return {
-                id: pin.id,
-                title: pin.title || pin.grid_title || "Pinterest Pin",
-                image: img,
-                source: `https://www.pinterest.com/pin/${pin.id}/`
-            };
-        });
-
-        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Cache-Control', 's-maxage=3600, stale-while-revalidate');
         res.status(200).json({
-            status: "success",
-            query: q,
+            status: pins.length > 0 ? "success" : "blocked",
             count: pins.length,
             images: pins
         });
 
     } catch (error) {
-        console.error("Scraper Error:", error.message);
-        res.status(500).json({ 
-            error: "Request Failed", 
+        res.status(500).json({
+            error: "Pinterest Blocked Vercel",
             message: error.message,
-            tip: "If you get 403, Pinterest has blacklisted this Vercel deployment region. Try changing Vercel Region to 'London' or 'Singapore' in settings."
+            tip: "Pinterest blocks Data Center IPs. Go to Vercel Settings -> Functions -> Region and change to 'syd1' (Sydney) or 'fra1' (Frankfurt) and redeploy."
         });
     }
 }
