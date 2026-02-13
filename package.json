@@ -1,14 +1,14 @@
 {
-  "name": "pinterest-vercel-api",
+  "name": "pinterest-api-lite",
   "version": "1.0.0",
   "scripts": {
     "start": "node api/index.js"
   },
   "dependencies": {
-    "@sparticuz/chromium": "^131.0.1",
-    "playwright-core": "^1.50.0"
+    "axios": "^1.6.0",
+    "user-agent-data-types": "^1.0.0"
   },
   "engines": {
-    "node": "20.x"
+    "node": "18.x"
   }
 }
