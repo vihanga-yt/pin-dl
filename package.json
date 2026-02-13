@@ -1,6 +1,6 @@
 {
-  "name": "pinterest-app-spoof",
-  "version": "7.0.0",
+  "name": "pinterest-proxy-bypass",
+  "version": "1.0.0",
   "dependencies": {
     "axios": "^1.6.0"
   },
