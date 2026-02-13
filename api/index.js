@@ -1,79 +1,93 @@
 const axios = require('axios');
-const cheerio = require('cheerio');
+const { wrapper } = require('axios-cookiejar-support');
+const { CookieJar } = require('tough-cookie');
 
 export default async function handler(req, res) {
     const { q } = req.query;
-    if (!q) return res.status(400).json({ error: "Search query 'q' required" });
+    if (!q) return res.status(400).json({ error: "Query 'q' is required" });
+
+    // 1. Initialize a real Cookie Jar to handle the session handshake
+    const jar = new CookieJar();
+    const client = wrapper(axios.create({ jar, withCredentials: true }));
+
+    // This specific User-Agent is less likely to trigger the 403 bot-wall
+    const userAgent = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1';
 
     try {
-        // STEP 1: Spoof Googlebot
-        // Pinterest allows Googlebot to see content to maintain their SEO rankings.
-        const response = await axios.get(`https://www.pinterest.com/search/pins/?q=${encodeURIComponent(q)}`, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Referer': 'https://www.google.com/'
-            },
-            timeout: 10000
+        // STEP 1: THE HANDSHAKE
+        // Visit the search page as a "Mobile User" to get a Guest Cookie
+        const handshake = await client.get(`https://www.pinterest.com/search/pins/?q=${encodeURIComponent(q)}`, {
+            headers: { 'User-Agent': userAgent }
         });
 
-        const $ = cheerio.load(response.data);
-        let images = [];
+        // STEP 2: EXTRACT THE CSRF TOKEN
+        // Pinterest won't allow API calls without this token synced to the cookie
+        const cookies = await jar.getCookies('https://www.pinterest.com/');
+        const csrfToken = cookies.find(c => c.key === 'csrftoken')?.value || 'missing';
 
-        // METHOD A: Scrape the JSON state (Hidden in script tags)
-        const scriptData = $('#__PWS_DATA__').html();
-        if (scriptData) {
-            try {
-                const json = JSON.parse(scriptData);
-                // Deep search for pins in the JSON tree
-                const pins = findInObject(json, 'pins');
-                if (pins) {
-                    Object.values(pins).forEach(pin => {
-                        if (pin.images?.orig?.url) images.push(pin.images.orig.url);
-                    });
-                }
-            } catch (e) { /* ignore parse errors */ }
-        }
+        // STEP 3: HIT THE INTERNAL RESOURCE API
+        // This is the endpoint GitHub scrapers use to get raw JSON
+        const searchPayload = {
+            options: {
+                query: q,
+                scope: "pins",
+                page_size: 25,
+                field_set_key: "unauth_react_main_grid"
+            },
+            context: {}
+        };
 
-        // METHOD B: Direct Image Extraction (Regex fallback)
-        if (images.length === 0) {
-            const html = response.data;
-            // Look for Pinterest original image patterns
-            const regex = /https:\/\/i\.pinimg\.com\/originals\/[a-z0-9\/]+\.(jpg|png|gif|webp)/g;
-            const matches = html.match(regex);
-            if (matches) images = [...new Set(matches)];
-        }
+        const apiResponse = await client.get('https://www.pinterest.com/resource/BaseSearchResource/get/', {
+            params: {
+                source_url: `/search/pins/?q=${encodeURIComponent(q)}`,
+                data: JSON.stringify(searchPayload),
+                _: Date.now()
+            },
+            headers: {
+                'User-Agent': userAgent,
+                'X-Requested-With': 'XMLHttpRequest',
+                'X-CSRFToken': csrfToken,
+                'Accept': 'application/json, text/javascript, */*; q=0.01',
+                'Referer': `https://www.pinterest.com/search/pins/?q=${encodeURIComponent(q)}`
+            }
+        });
 
-        // Clean up and convert to high-res
-        const cleanImages = images
-            .map(img => img.replace(/\/(236x|474x|564x|736x)\//, '/originals/'))
-            .filter(img => img.includes('i.pinimg.com'));
+        // STEP 4: PARSE DATA
+        const results = apiResponse.data?.resource_response?.data?.results || [];
 
+        const pins = results.map(pin => ({
+            id: pin.id,
+            title: pin.title || pin.grid_title || "Pinterest Image",
+            // We force 'orig' (Original) for the best resolution
+            image: pin.images?.orig?.url || pin.images?.['736x']?.url,
+            pinner: pin.pinner?.username,
+            url: `https://www.pinterest.com/pin/${pin.id}/`
+        })).filter(p => p.image); // Remove any broken results
+
+        // STEP 5: RETURN JSON
         res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Content-Type', 'application/json');
+        
+        if (pins.length === 0) {
+            return res.status(404).json({ 
+                status: "blocked", 
+                message: "Pinterest returned 0 results. Vercel IP might be throttled." 
+            });
+        }
+
         res.status(200).json({
-            status: cleanImages.length > 0 ? "success" : "limited",
-            count: cleanImages.length,
-            images: cleanImages,
-            note: cleanImages.length === 0 ? "Pinterest is heavily throttling this IP. Try changing Vercel region." : null
+            status: "success",
+            query: q,
+            count: pins.length,
+            images: pins
         });
 
     } catch (error) {
+        console.error("Scraper Error:", error.message);
         res.status(500).json({
-            error: "Pinterest 403 Bypass Failed",
+            error: "Pinterest 403 / Blocked",
             message: error.message,
-            tip: "Change Vercel Region to 'syd1' (Sydney) or 'hnd1' (Tokyo) in Project Settings -> Functions."
+            tip: "GO TO VERCEL SETTINGS -> FUNCTIONS -> REGION. CHANGE TO 'Sydney (syd1)' or 'Frankfurt (fra1)'. Pinterest blocks US-East IPs."
         });
     }
-}
-
-// Helper to find a key anywhere in a deep JSON object
-function findInObject(obj, key) {
-    if (obj && typeof obj === 'object') {
-        if (obj[key]) return obj[key];
-        for (const k in obj) {
-            const result = findInObject(obj[k], key);
-            if (result) return result;
-        }
-    }
-    return null;
 }
